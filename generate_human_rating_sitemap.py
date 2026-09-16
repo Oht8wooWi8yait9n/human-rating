@@ -122,10 +122,10 @@ def crawl_human_rating_portal():
 
     def fetch_page(url: str):
         try:
-            r = session.get(url, timeout=12)
+            r = requests.get(url, headers=HEADERS, timeout=10)
             if r.status_code == 200:
                 return url, r.text
-        except Exception as e:
+        except Exception:
             pass
         return url, None
 
@@ -151,9 +151,9 @@ def crawl_human_rating_portal():
                     clean = normalize_url(full)
 
                     if clean.lower().endswith(".pdf"):
-                        # Ensure only official NASA host PDFs
+                        # Ensure only official NASA host PDFs, excluding external repos like HRR
                         p = urlparse(clean)
-                        if "nasa.gov" in p.netloc:
+                        if "nasa.gov" in p.netloc and "humanresearchroadmap" not in p.netloc:
                             discovered_pdfs.add(clean)
                     elif is_target_html_url(clean) and clean not in visited_pages:
                         to_visit.add(clean)
@@ -206,7 +206,10 @@ def main():
     print("=" * 70)
 
     # 1. Full Consolidated Sitemap (HTML + PDFs)
-    all_urls = sorted(set(html_pages + pdf_docs))
+    # Always ensure the main Human Rating Guidance landing page is index 0
+    # so Onyx's web connector check_internet_connection(to_visit_list[0]) tests www.nasa.gov
+    other_urls = sorted(set(html_pages + pdf_docs) - {START_URL})
+    all_urls = [START_URL] + other_urls
     build_sitemap_xml(all_urls, "human_rating_sitemap.xml")
 
     # 2. PDF Only Sitemap

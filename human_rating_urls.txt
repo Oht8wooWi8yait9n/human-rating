@@ -1,5 +1,4 @@
-https://humanresearchroadmap.nasa.gov/Evidence/reports/Muscle.pdf
-https://humanresearchroadmap.nasa.gov/evidence/reports/OP%2520Dynamic%2520Loads%2520EB%2520FINAL_11-30-22.pdf
+https://www.nasa.gov/human-rating-guidance/
 https://nodis3.gsfc.nasa.gov/OPD_docs/NID_8900_136_.pdf
 https://nodis3.gsfc.nasa.gov/npg_img/N_PR_8910_001D_/N_PR_8910_001D_.pdf
 https://ntrs.nasa.gov/api/citations/19760005580/downloads/19760005580.pdf
@@ -16,7 +15,6 @@ https://www.nasa.gov/directorates/esdmd/hhp/human-spaceflight-and-aviation-stand
 https://www.nasa.gov/employee-assistance-program-ochmo/
 https://www.nasa.gov/general/nasas-integrated-medical-model-imm/
 https://www.nasa.gov/human-integration-design-handbook/
-https://www.nasa.gov/human-rating-guidance/
 https://www.nasa.gov/integrated-medical-model-documentation/
 https://www.nasa.gov/low-earth-orbit-imm-runs/
 https://www.nasa.gov/lunar-orbit-and-surface-imm-runs/
