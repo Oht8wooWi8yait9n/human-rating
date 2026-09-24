@@ -16,21 +16,32 @@ Covers:
   7. NASA Integrated Medical Model (IMM) runs, CliFFs, and documentation.
 """
 
+import os
 import sys
 import time
 import re
+import subprocess
 from datetime import datetime, timezone
 from urllib.parse import urljoin, urlparse, urlunparse, quote
 from concurrent.futures import ThreadPoolExecutor
 import xml.etree.ElementTree as ET
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/128.0.0.0 Safari/537.36"
+    ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
 START_URL = "https://www.nasa.gov/human-rating-guidance/"
+MINIMUM_EXPECTED_URLS = 450
+MAX_WORKERS = 4
+REQUEST_TIMEOUT = 25
 
 CORE_SEEDS = [
     "https://www.nasa.gov/human-rating-guidance/",
@@ -88,6 +99,22 @@ DISALLOWED_PATHS = [
 ]
 
 
+def create_resilient_session() -> requests.Session:
+    """Create a requests session with automatic retries and exponential backoff."""
+    session = requests.Session()
+    retries = Retry(
+        total=5,
+        backoff_factor=1.5,
+        status_forcelist=[429, 500, 502, 503, 504],
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retries, pool_connections=MAX_WORKERS, pool_maxsize=MAX_WORKERS)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers.update(HEADERS)
+    return session
+
+
 def normalize_url(url: str) -> str:
     """Strip tracking query parameters and fragments, percent-encode path."""
     clean = url.split("?")[0].split("#")[0].strip()
@@ -110,10 +137,10 @@ def is_target_html_url(url: str) -> bool:
 def crawl_human_rating_portal():
     print("=" * 70)
     print(" NASA Human Rating Guidance & OCHMO Standards Crawler")
+    print(" (Resilient Rate-Throttled Engine with Zero-Churn Preservation)")
     print("=" * 70)
 
-    session = requests.Session()
-    session.headers.update(HEADERS)
+    session = create_resilient_session()
 
     visited_pages = set()
     to_visit = set(normalize_url(u) for u in CORE_SEEDS)
@@ -121,12 +148,19 @@ def crawl_human_rating_portal():
     discovered_html_pages = set()
 
     def fetch_page(url: str):
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=10)
-            if r.status_code == 200:
-                return url, r.text
-        except Exception:
-            pass
+        for attempt in range(1, 4):
+            try:
+                r = session.get(url, timeout=REQUEST_TIMEOUT)
+                if r.status_code == 200:
+                    return url, r.text
+                elif r.status_code in [404, 410]:
+                    print(f"[!] Page not found ({r.status_code}): {url}", file=sys.stderr)
+                    return url, None
+                else:
+                    print(f"[!] Warning: HTTP {r.status_code} on {url} (attempt {attempt}/3)", file=sys.stderr)
+            except Exception as e:
+                print(f"[!] Error fetching {url} (attempt {attempt}/3): {e}", file=sys.stderr)
+            time.sleep(1.0 * attempt)
         return url, None
 
     depth = 0
@@ -136,9 +170,9 @@ def crawl_human_rating_portal():
         depth += 1
         current_batch = list(to_visit - visited_pages)
         to_visit = set()
-        print(f"\n[*] Depth {depth}: Crawling {len(current_batch)} pages...", flush=True)
+        print(f"\n[*] Depth {depth}: Crawling {len(current_batch)} pages with {MAX_WORKERS} workers...", flush=True)
 
-        with ThreadPoolExecutor(max_workers=10) as executor:
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             for url, html in executor.map(fetch_page, current_batch):
                 visited_pages.add(url)
                 if not html:
@@ -165,8 +199,50 @@ def crawl_human_rating_portal():
     return sorted(discovered_html_pages), sorted(discovered_pdfs)
 
 
-def build_sitemap_xml(urls: list[str], output_path: str):
-    """Build a sitemaps.org compliant XML sitemap."""
+def load_existing_lastmods(sitemap_path: str) -> dict[str, str]:
+    """Load existing lastmod dates to prevent zero-change git churn."""
+    existing = {}
+    if os.path.exists(sitemap_path):
+        try:
+            tree = ET.parse(sitemap_path)
+            root = tree.getroot()
+            ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+            for url_elem in root.findall("sm:url", ns):
+                loc_elem = url_elem.find("sm:loc", ns)
+                lastmod_elem = url_elem.find("sm:lastmod", ns)
+                if loc_elem is not None and loc_elem.text and lastmod_elem is not None and lastmod_elem.text:
+                    existing[loc_elem.text.strip()] = lastmod_elem.text.strip()
+            print(f"[*] Loaded {len(existing)} existing lastmod timestamps from {sitemap_path}")
+        except Exception as e:
+            print(f"[!] Warning reading existing lastmod timestamps: {e}")
+
+    # Fallback to git history if current file is suspiciously pruned
+    if len(existing) < MINIMUM_EXPECTED_URLS:
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            cmd = ["git", "-C", script_dir, "show", "HEAD~1:human_rating_sitemap.xml"]
+            out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL)
+            root = ET.fromstring(out)
+            ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+            recovered = 0
+            for url_elem in root.findall("sm:url", ns):
+                loc_elem = url_elem.find("sm:loc", ns)
+                lastmod_elem = url_elem.find("sm:lastmod", ns)
+                if loc_elem is not None and loc_elem.text and lastmod_elem is not None and lastmod_elem.text:
+                    loc = loc_elem.text.strip()
+                    if loc not in existing:
+                        existing[loc] = lastmod_elem.text.strip()
+                        recovered += 1
+            if recovered > 0:
+                print(f"[*] Recovered {recovered} prior timestamps from git history (HEAD~1)")
+        except Exception:
+            pass
+
+    return existing
+
+
+def build_sitemap_xml(urls: list[str], output_path: str, existing_lastmods: dict[str, str]):
+    """Build a sitemaps.org compliant XML sitemap preserving timestamps."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     root = ET.Element("urlset", xmlns="http://www.sitemaps.org/schemas/sitemap/0.9")
 
@@ -175,7 +251,7 @@ def build_sitemap_xml(urls: list[str], output_path: str):
         loc_elem = ET.SubElement(url_elem, "loc")
         loc_elem.text = url
         lastmod_elem = ET.SubElement(url_elem, "lastmod")
-        lastmod_elem.text = today
+        lastmod_elem.text = existing_lastmods.get(url, today)
 
     xml_bytes = ET.tostring(root, encoding="utf-8", xml_declaration=True)
     with open(output_path, "wb") as f:
@@ -185,7 +261,27 @@ def build_sitemap_xml(urls: list[str], output_path: str):
 
 
 def main():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    sitemap_path = os.path.join(script_dir, "human_rating_sitemap.xml")
+    pdf_sitemap_path = os.path.join(script_dir, "human_rating_pdf_sitemap.xml")
+    imm_sitemap_path = os.path.join(script_dir, "imm_sitemap.xml")
+    urls_txt_path = os.path.join(script_dir, "human_rating_urls.txt")
+
+    existing_lastmods = load_existing_lastmods(sitemap_path)
+
     html_pages, pdf_docs = crawl_human_rating_portal()
+
+    # 1. Full Consolidated Sitemap (HTML + PDFs)
+    # Always ensure the main Human Rating Guidance landing page is index 0
+    # so Onyx's web connector check_internet_connection(to_visit_list[0]) tests www.nasa.gov
+    other_urls = sorted(set(html_pages + pdf_docs) - {START_URL})
+    all_urls = [START_URL] + other_urls
+
+    # SAFETY THRESHOLD CHECK
+    if len(all_urls) < MINIMUM_EXPECTED_URLS:
+        print(f"\n[!] FATAL ERROR: Discovered only {len(all_urls)} URLs (safety threshold is >= {MINIMUM_EXPECTED_URLS})!", file=sys.stderr)
+        print(f"[!] Aborting to prevent accidental pruning of production sitemaps.", file=sys.stderr)
+        sys.exit(1)
 
     # Partition documents
     tbs = [p for p in pdf_docs if any(k in p for k in ["ochmo-tb-", "ochmo-mtb-"])]
@@ -202,28 +298,24 @@ def main():
     print(f"  IMM PDFs (CliFFs / DRMs / PR):{len(imm_pdfs)}")
     print(f"  Other Research & Reports:     {len(pdf_docs) - len(tbs) - len(hbs) - len(stds) - len(imm_pdfs)}")
     print(f"  HTML Guidance Pages:          {len(html_pages)}")
-    print(f"  Total Indexed Items:          {len(html_pages) + len(pdf_docs)}")
+    print(f"  Total Indexed Items:          {len(all_urls)}")
     print("=" * 70)
 
     # 1. Full Consolidated Sitemap (HTML + PDFs)
-    # Always ensure the main Human Rating Guidance landing page is index 0
-    # so Onyx's web connector check_internet_connection(to_visit_list[0]) tests www.nasa.gov
-    other_urls = sorted(set(html_pages + pdf_docs) - {START_URL})
-    all_urls = [START_URL] + other_urls
-    build_sitemap_xml(all_urls, "human_rating_sitemap.xml")
+    build_sitemap_xml(all_urls, sitemap_path, existing_lastmods)
 
     # 2. PDF Only Sitemap
-    build_sitemap_xml(pdf_docs, "human_rating_pdf_sitemap.xml")
+    build_sitemap_xml(pdf_docs, pdf_sitemap_path, existing_lastmods)
 
     # 3. IMM Specific Subset Sitemap (for standalone connector option)
     imm_urls = sorted(set([u for u in html_pages if "imm" in u] + imm_pdfs))
-    build_sitemap_xml(imm_urls, "imm_sitemap.xml")
+    build_sitemap_xml(imm_urls, imm_sitemap_path, existing_lastmods)
 
     # 4. Text URL list
-    with open("human_rating_urls.txt", "w", encoding="utf-8") as f:
+    with open(urls_txt_path, "w", encoding="utf-8") as f:
         for u in all_urls:
             f.write(f"{u}\n")
-    print(f"[+] Written full URL list to human_rating_urls.txt")
+    print(f"[+] Written full URL list ({len(all_urls)} URLs) to {urls_txt_path}")
 
 
 if __name__ == "__main__":

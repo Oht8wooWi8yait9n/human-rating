@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -25,11 +27,20 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          pip install requests urllib3
 
       - name: Run Human Rating Crawler & Generate Sitemaps
         run: |
           python generate_human_rating_sitemap.py
+
+      - name: Validate Sitemap URL Count
+        run: |
+          URL_COUNT=$(wc -l < human_rating_urls.txt)
+          echo "Collected $URL_COUNT URLs."
+          if [ "$URL_COUNT" -lt 450 ]; then
+            echo "Error: URL count $URL_COUNT is below safety threshold 450. Aborting commit to prevent pruning."
+            exit 1
+          fi
 
       - name: Commit and push changes
         run: |
